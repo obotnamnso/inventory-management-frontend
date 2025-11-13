@@ -3,6 +3,7 @@ import ProductList from './components/ProductList';
 import Dashboard from './components/Dashboard';
 import CustomerList from './components/CustomerList';
 import OrderList from './components/OrderList';
+import ConnectionTest from './components/ConnectionTest';
 import './App.css';
 
 function App() {
@@ -41,6 +42,12 @@ function App() {
           >
             📋 Orders
           </button>
+          <button 
+            className={currentView === 'test' ? 'nav-btn active' : 'nav-btn'}
+            onClick={() => setCurrentView('test')}
+          >
+            🔗 API Test
+          </button>
         </nav>
       </header>
 
@@ -49,6 +56,7 @@ function App() {
         {currentView === 'products' && <ProductList />}
         {currentView === 'customers' && <CustomerList />}
         {currentView === 'orders' && <OrderList />}
+        {currentView === 'test' && <ConnectionTest />}
       </main>
     </div>
   );

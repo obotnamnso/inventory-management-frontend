@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import apiService from '../services/api';
 import { formatPrice } from '../utils/priceFormatter';
 import SalesChart from './SalesChart';
 import '../styles/Dashboard.css';
@@ -35,7 +36,7 @@ const Dashboard = () => {
 
       console.log('🔄 Fetching dashboard data...');
 
-      // Use the new dashboard summary endpoint for accurate data
+      // Use localhost:8000 for consistency with Django server
       const [
         dashboardResponse,
         productsResponse,
