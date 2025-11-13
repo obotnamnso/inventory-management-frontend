@@ -1,0 +1,656 @@
+import React, { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+import AddOrderForm from './AddOrderForm';
+import EditOrderForm from './EditOrderForm';
+import DeleteOrderConfirmation from './DeleteOrderConfirmation';
+import FilterPanel from './FilterPanel';
+import { formatPrice } from '../utils/priceFormatter';
+import '../styles/OrderForms.css';
+
+const OrderList = () => {
+  // Main state
+  const [orders, setOrders] = useState([]);
+  const [filteredOrders, setFilteredOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Advanced filter states
+  const [filters, setFilters] = useState({
+    search: '',
+    status: '',
+    customer: '',
+    dateFrom: null,
+    dateTo: null,
+    amountMin: '',
+    amountMax: '',
+    orderBy: 'date_desc'
+  });
+  const [showFilters, setShowFilters] = useState(true);
+
+  // Legacy filter states removed - now using filters object from FilterPanel
+
+  // Modal states
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [editOrder, setEditOrder] = useState(null);
+  const [viewOrder, setViewOrder] = useState(null);
+  const [deleteOrder, setDeleteOrder] = useState(null);
+
+  // Reference data
+  const [customers, setCustomers] = useState([]);
+  const [products, setProducts] = useState([]);
+  const orderItemsRef = useRef([]);
+
+  // User permissions
+  const [userRole] = useState('manager'); // TODO: Get from auth context
+
+  // Filter handlers
+  const handleFiltersChange = (newFilters) => {
+    setFilters(newFilters);
+  };
+
+  const handleClearFilters = () => {
+    setFilters({
+      search: '',
+      status: '',
+      customer: '',
+      dateFrom: null,
+      dateTo: null,
+      amountMin: '',
+      amountMax: '',
+      orderBy: 'date_desc'
+    });
+  };
+
+  const toggleFiltersVisibility = () => {
+    setShowFilters(!showFilters);
+  };
+
+  // Helper function to calculate order total
+  const calculateOrderTotal = (order) => {
+    const orderItems = orderItemsRef.current.filter(item => 
+      Number(item.order) === Number(order.id)
+    );
+    
+    if (orderItems.length > 0) {
+      return orderItems.reduce((total, item) => {
+        const itemPrice = parseFloat(item.price) || 0;
+        const itemQuantity = parseInt(item.quantity) || 0;
+        return total + (itemPrice * itemQuantity);
+      }, 0);
+    }
+    
+    // Fallback to Django stored total
+    return parseFloat(order.total || 0);
+  };
+
+  useEffect(() => {
+    fetchOrders();
+    fetchReferenceData();
+  }, []);
+
+  // Advanced Filter and search logic
+  useEffect(() => {
+    let filtered = [...orders];
+
+    // Global search across multiple fields
+    if (filters.search) {
+      const searchLower = filters.search.toLowerCase();
+      filtered = filtered.filter(order => {
+        const customerName = order.customer?.toLowerCase() || '';
+        const orderId = order.id.toString();
+        const status = order.status?.toLowerCase() || '';
+        
+        // Search in order items for product names
+        const orderItems = orderItemsRef.current.filter(item => 
+          Number(item.order) === Number(order.id)
+        );
+        const productNames = orderItems.map(item => 
+          item.product?.name?.toLowerCase() || ''
+        ).join(' ');
+        
+        return customerName.includes(searchLower) ||
+               orderId.includes(searchLower) ||
+               status.includes(searchLower) ||
+               productNames.includes(searchLower);
+      });
+    }
+
+    // Filter by status
+    if (filters.status) {
+      filtered = filtered.filter(order => order.status === filters.status);
+    }
+
+    // Filter by customer
+    if (filters.customer) {
+      filtered = filtered.filter(order => 
+        Number(order.customer_id) === Number(filters.customer)
+      );
+    }
+
+    // Filter by date range
+    if (filters.dateFrom) {
+      const fromDate = new Date(filters.dateFrom);
+      fromDate.setHours(0, 0, 0, 0);
+      filtered = filtered.filter(order => {
+        const orderDate = new Date(order.order_date);
+        return orderDate >= fromDate;
+      });
+    }
+
+    if (filters.dateTo) {
+      const toDate = new Date(filters.dateTo);
+      toDate.setHours(23, 59, 59, 999);
+      filtered = filtered.filter(order => {
+        const orderDate = new Date(order.order_date);
+        return orderDate <= toDate;
+      });
+    }
+
+    // Filter by amount range
+    if (filters.amountMin) {
+      const minAmount = parseFloat(filters.amountMin);
+      filtered = filtered.filter(order => {
+        const orderTotal = calculateOrderTotal(order);
+        return orderTotal >= minAmount;
+      });
+    }
+
+    if (filters.amountMax) {
+      const maxAmount = parseFloat(filters.amountMax);
+      filtered = filtered.filter(order => {
+        const orderTotal = calculateOrderTotal(order);
+        return orderTotal <= maxAmount;
+      });
+    }
+
+    // Advanced sorting
+    filtered.sort((a, b) => {
+      switch (filters.orderBy) {
+        case 'date_asc':
+          return new Date(a.order_date) - new Date(b.order_date);
+        case 'date_desc':
+          return new Date(b.order_date) - new Date(a.order_date);
+        case 'amount_asc':
+          return calculateOrderTotal(a) - calculateOrderTotal(b);
+        case 'amount_desc':
+          return calculateOrderTotal(b) - calculateOrderTotal(a);
+        case 'customer_asc':
+          return (a.customer || '').localeCompare(b.customer || '');
+        case 'status_asc':
+          return (a.status || '').localeCompare(b.status || '');
+        default:
+          return new Date(b.order_date) - new Date(a.order_date);
+      }
+    });
+
+    setFilteredOrders(filtered);
+  }, [orders, filters]);
+
+  const fetchOrders = async () => {
+    try {
+      setLoading(true);
+      setError('');
+
+      console.log('🔄 Fetching all data with relationships...');
+
+      // Fetch all paginated data from each endpoint
+      const fetchAllData = async (endpoint) => {
+        let allData = [];
+        let nextUrl = `http://localhost:8000/api/${endpoint}/`;
+        
+        while (nextUrl) {
+          const response = await axios.get(nextUrl);
+          allData = [...allData, ...(response.data.results || [])];
+          nextUrl = response.data.next;
+        }
+        
+        return allData;
+      };
+
+      // Fetch all related data concurrently
+      const [ordersData, orderItemsData, discountsData] = await Promise.all([
+        fetchAllData('orders'),
+        fetchAllData('order-items'),
+        fetchAllData('discounts')
+      ]);
+
+      console.log('📊 Complete Data Analysis:', {
+        orders: ordersData.length,
+        orderItems: orderItemsData.length,
+        discounts: discountsData.length
+      });
+
+      // Debug: Check data types and relationships
+      console.log('� Relationship Debug:', {
+        sampleOrder: ordersData[0],
+        sampleOrderItem: orderItemsData[0],
+        sampleDiscount: discountsData[0]
+      });
+
+      // Create comprehensive order relationships with proper type handling
+      const enrichedOrders = ordersData.map(order => {
+        // Find all items for this order - Handle type coercion
+        const orderItems = orderItemsData.filter(item => {
+          const itemOrderId = Number(item.order);
+          const orderIdValue = Number(order.id);
+          const matches = itemOrderId === orderIdValue;
+          if (matches) {
+            console.log(`✅ MATCH: Order ${orderIdValue} ← Item ${item.id}`);
+          }
+          return matches;
+        });
+
+        // Find all discounts for order items
+        const orderDiscounts = discountsData.filter(discount => {
+          return orderItems.some(item => discount.order_item === item.id);
+        });
+
+        // Calculate base total price
+        const baseTotal = orderItems.reduce((sum, item) => {
+          const itemTotal = parseFloat(item.price || 0) * parseFloat(item.quantity || 0);
+          console.log(`💰 Item ${item.id}: ${item.price} × ${item.quantity} = ${itemTotal}`);
+          return sum + itemTotal;
+        }, 0);
+
+        // Calculate total discount amount
+        const totalDiscount = orderDiscounts.reduce((sum, discount) => {
+          return sum + parseFloat(discount.discount_amount || 0);
+        }, 0);
+
+        // Final total after discounts or fallback to Django total
+        const calculatedTotal = baseTotal - totalDiscount;
+        const finalTotal = calculatedTotal > 0 ? calculatedTotal : parseFloat(order.total || 0);
+
+        console.log(`📋 Order ${order.id}: ${orderItems.length} items, Calculated: ₦${calculatedTotal.toFixed(2)}, Django Total: ₦${parseFloat(order.total || 0).toFixed(2)}, Final: ₦${finalTotal.toFixed(2)}`);
+
+        return {
+          ...order,
+          itemCount: orderItems.length,
+          baseTotal: baseTotal > 0 ? baseTotal : parseFloat(order.total || 0),
+          totalDiscount: totalDiscount,
+          totalPrice: finalTotal,
+          items: orderItems,
+          discounts: orderDiscounts
+        };
+      });
+
+      console.log('✅ Enriched orders:', enrichedOrders.length);
+      setOrders(enrichedOrders);
+
+    } catch (error) {
+      console.error('❌ Error fetching orders:', error);
+      setError('Failed to fetch orders: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchReferenceData = async () => {
+    try {
+      const [customersResponse, productsResponse, orderItemsResponse] = await Promise.all([
+        axios.get('http://localhost:8000/api/customers/'),
+        axios.get('http://localhost:8000/api/products/'),
+        axios.get('http://localhost:8000/api/order-items/')
+      ]);
+
+      setCustomers(customersResponse.data.results || customersResponse.data);
+      setProducts(productsResponse.data.results || productsResponse.data);
+      orderItemsRef.current = orderItemsResponse.data.results || orderItemsResponse.data;
+    } catch (error) {
+      console.error('Error fetching reference data:', error);
+    }
+  };
+
+  const getStatusInfo = (status) => {
+    switch (status.toLowerCase()) {
+      case 'pending':
+        return { class: 'pending', icon: '⏳', color: '#f39c12' };
+      case 'processing':
+        return { class: 'processing', icon: '🔄', color: '#3498db' };
+      case 'completed':
+        return { class: 'completed', icon: '✅', color: '#27ae60' };
+      case 'cancelled':
+        return { class: 'cancelled', icon: '❌', color: '#e74c3c' };
+      default:
+        return { class: 'unknown', icon: '❓', color: '#95a5a6' };
+    }
+  };
+
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  // CRUD Handlers
+  const handleAddOrder = () => {
+    setShowAddForm(true);
+  };
+
+  const handleOrderAdded = (newOrder) => {
+    setShowAddForm(false);
+    fetchOrders(); // Refresh to get updated data
+  };
+
+  const handleEditOrder = (order) => {
+    setEditOrder(order);
+  };
+
+  const handleOrderUpdated = (updatedOrder) => {
+    setEditOrder(null);
+    fetchOrders(); // Refresh to get updated data
+  };
+
+  const handleViewOrder = (order) => {
+    setViewOrder(order);
+  };
+
+  const handleDeleteOrder = (order) => {
+    setDeleteOrder(order);
+  };
+
+  const handleOrderDeleted = (deletedOrderId) => {
+    setOrders(prev => prev.filter(o => o.id !== deletedOrderId));
+    setDeleteOrder(null);
+  };
+
+  // Quick status update
+  const updateOrderStatus = async (orderId, newStatus) => {
+    try {
+      await axios.patch(`http://localhost:8000/api/orders/${orderId}/`, {
+        status: newStatus
+      });
+      
+      setOrders(prev => prev.map(order => 
+        order.id === orderId ? { ...order, status: newStatus } : order
+      ));
+    } catch (error) {
+      console.error('Error updating order status:', error);
+      alert('Failed to update order status');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="order-list-container">
+        <div className="loading-state">
+          <div className="loading-spinner"></div>
+          <h3>Loading orders...</h3>
+          <p>Please wait while we fetch the order data</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="order-list-container">
+        <div className="error-state">
+          <h3>❌ Error Loading Orders</h3>
+          <p>{error}</p>
+          <button onClick={fetchOrders} className="retry-btn">
+            🔄 Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="order-list-container">
+      {/* Header */}
+      <div className="page-header">
+        <h1>🛒 Order Management</h1>
+        <div className="header-actions">
+          <button onClick={fetchOrders} className="refresh-btn">
+            🔄 Refresh Orders
+          </button>
+          {(userRole === 'manager' || userRole === 'sales') && (
+            <button onClick={handleAddOrder} className="add-order-btn">
+              ➕ Create New Order
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Advanced Filter Panel */}
+      <FilterPanel
+        filters={filters}
+        onFiltersChange={handleFiltersChange}
+        customers={customers}
+        onClearFilters={handleClearFilters}
+        totalResults={filteredOrders.length}
+        isVisible={showFilters}
+        onToggleVisibility={toggleFiltersVisibility}
+      />
+
+      {/* Filters Section */}
+      {/* Results info moved to FilterPanel */}
+
+      {/* Order Statistics */}
+      <div className="order-stats">
+        <div className="stat-card">
+          <div className="stat-icon">🛒</div>
+          <div className="stat-info">
+            <h3>{orders.length}</h3>
+            <p>Total Orders</p>
+          </div>
+        </div>
+        
+        <div className="stat-card">
+          <div className="stat-icon">✅</div>
+          <div className="stat-info">
+            <h3>{orders.filter(o => o.status === 'Completed').length}</h3>
+            <p>Completed</p>
+          </div>
+        </div>
+        
+        <div className="stat-card">
+          <div className="stat-icon">⏳</div>
+          <div className="stat-info">
+            <h3>{orders.filter(o => o.status === 'Pending').length}</h3>
+            <p>Pending</p>
+          </div>
+        </div>
+        
+        <div className="stat-card">
+          <div className="stat-icon">💰</div>
+          <div className="stat-info">
+            <h3>{formatPrice(orders.reduce((sum, o) => sum + (o.totalPrice || 0), 0))}</h3>
+            <p>Total Value (After Discounts)</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Orders Table */}
+      <div className="orders-section">
+        <h2>Orders List</h2>
+        
+        {filteredOrders.length === 0 ? (
+          <div className="no-orders">
+            {orders.length === 0 ? (
+              <>
+                <h3>No Orders Yet</h3>
+                <p>Start processing orders by creating your first order</p>
+                <button onClick={handleAddOrder} className="add-first-order-btn">
+                  ➕ Create First Order
+                </button>
+              </>
+            ) : (
+              <p>No orders match your search criteria. Try adjusting your filters.</p>
+            )}
+          </div>
+        ) : (
+          <div className="orders-table-container">
+            <table className="orders-table">
+              <thead>
+                <tr>
+                  <th>Order ID</th>
+                  <th>Customer</th>
+                  <th>Date</th>
+                  <th>Items</th>
+                  <th>Total</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredOrders.map(order => {
+                  const statusInfo = getStatusInfo(order.status);
+                  return (
+                    <tr key={order.id}>
+                      <td>
+                        <div className="order-id">
+                          <strong>#{order.id}</strong>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="customer-info">
+                          <strong>{order.customer}</strong>
+                          <small>by {order.user}</small>
+                        </div>
+                      </td>
+                      <td>{formatDate(order.order_date)}</td>
+                      <td>
+                        <span className="item-count">
+                          {order.itemCount} item{order.itemCount !== 1 ? 's' : ''}
+                        </span>
+                      </td>
+                      <td className="amount">
+                        <div className="price-breakdown">
+                          <strong>{formatPrice(order.totalPrice || 0)}</strong>
+                          {order.totalDiscount > 0 && (
+                            <div className="discount-info">
+                              <small>Base: {formatPrice(order.baseTotal)}</small>
+                              <small className="discount">-{formatPrice(order.totalDiscount)}</small>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="status-cell">
+                          <span 
+                            className={`status-badge ${statusInfo.class}`}
+                            style={{ backgroundColor: statusInfo.color }}
+                          >
+                            {statusInfo.icon} {order.status}
+                          </span>
+                          {(userRole === 'manager' || userRole === 'sales') && order.status !== 'Completed' && (
+                            <div className="status-actions">
+                              {order.status === 'Pending' && (
+                                <button
+                                  onClick={() => updateOrderStatus(order.id, 'Processing')}
+                                  className="status-btn process-btn"
+                                  title="Start Processing"
+                                >
+                                  🔄
+                                </button>
+                              )}
+                              {(order.status === 'Pending' || order.status === 'Processing') && (
+                                <button
+                                  onClick={() => updateOrderStatus(order.id, 'Completed')}
+                                  className="status-btn complete-btn"
+                                  title="Mark Complete"
+                                >
+                                  ✅
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="action-buttons">
+                          <button
+                            onClick={() => handleViewOrder(order)}
+                            className="action-btn view-btn"
+                            title="View Details"
+                          >
+                            👁️
+                          </button>
+                          <button
+                            onClick={() => handleEditOrder(order)}
+                            className="action-btn edit-btn"
+                            disabled={userRole === 'viewer' || order.status === 'Completed'}
+                            title="Edit Order"
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            onClick={() => handleDeleteOrder(order)}
+                            className="action-btn delete-btn"
+                            disabled={userRole !== 'manager' || order.status === 'Completed'}
+                            title="Delete Order"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Modal Components */}
+      {showAddForm && (
+        <AddOrderForm
+          onCancel={() => setShowAddForm(false)}
+          onOrderAdded={handleOrderAdded}
+          customers={customers}
+          products={products}
+          userRole={userRole}
+        />
+      )}
+
+      {editOrder && (
+        <EditOrderForm
+          order={editOrder}
+          onCancel={() => setEditOrder(null)}
+          onOrderUpdated={handleOrderUpdated}
+          customers={customers}
+          products={products}
+          userRole={userRole}
+        />
+      )}
+
+      {viewOrder && (
+        <div className="modal-overlay">
+          <div className="order-details-modal">
+            <div className="modal-header">
+              <h2>🛒 Order Details - #{viewOrder.id}</h2>
+              <button onClick={() => setViewOrder(null)} className="close-btn">✕</button>
+            </div>
+            <div className="modal-content">
+              <p>Order details coming soon! (OrderDetails component temporarily disabled for testing)</p>
+              <p><strong>Customer:</strong> {viewOrder.customer}</p>
+              <p><strong>Status:</strong> {viewOrder.status}</p>
+              <p><strong>Total:</strong> {formatPrice(viewOrder.total)}</p>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => setViewOrder(null)} className="cancel-btn">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteOrder && (
+        <DeleteOrderConfirmation
+          order={deleteOrder}
+          onCancel={() => setDeleteOrder(null)}
+          onOrderDeleted={handleOrderDeleted}
+          userRole={userRole}
+        />
+      )}
+    </div>
+  );
+};
+
+export default OrderList;

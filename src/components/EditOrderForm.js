@@ -1,0 +1,529 @@
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { formatPrice } from '../utils/priceFormatter';
+import '../styles/OrderForms.css';
+
+const EditOrderForm = ({ order, onCancel, onOrderUpdated, customers, products, userRole }) => {
+  // Form state
+  const [formData, setFormData] = useState({
+    customer: order?.customer || '',
+    status: order?.status || 'Pending'
+  });
+
+  // Order items state
+  const [orderItems, setOrderItems] = useState([]);
+  const [currentItem, setCurrentItem] = useState({
+    product: '',
+    quantity: 1,
+    price: '',
+    discount: 0
+  });
+
+  // UI state
+  const [loading, setLoading] = useState(false);
+  const [errors, setErrors] = useState({});
+  const [availableProducts, setAvailableProducts] = useState(products || []);
+
+  useEffect(() => {
+    if (order && order.items) {
+      // Initialize with existing order items
+      const enrichedItems = order.items.map(item => {
+        const product = products.find(p => p.id === item.product?.id);
+        return {
+          id: item.id, // Include item ID for updates
+          product: item.product?.id || item.product,
+          productName: product?.name || item.product?.name || 'Unknown Product',
+          productDetails: product || item.product,
+          quantity: item.quantity,
+          price: item.price,
+          discount: item.discount || 0
+        };
+      });
+      setOrderItems(enrichedItems);
+    }
+    setAvailableProducts(products || []);
+  }, [order, products]);
+
+  // Handle form field changes
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }));
+    
+    // Clear field error when user starts typing
+    if (errors[name]) {
+      setErrors(prev => ({
+        ...prev,
+        [name]: ''
+      }));
+    }
+  };
+
+  // Handle item field changes
+  const handleItemChange = (e) => {
+    const { name, value } = e.target;
+    
+    if (name === 'product') {
+      const selectedProduct = availableProducts.find(p => p.id === parseInt(value));
+      setCurrentItem(prev => ({
+        ...prev,
+        [name]: value,
+        price: selectedProduct ? selectedProduct.price : ''
+      }));
+    } else {
+      setCurrentItem(prev => ({
+        ...prev,
+        [name]: value
+      }));
+    }
+  };
+
+  // Add new item to order
+  const addItemToOrder = () => {
+    // Validate item
+    if (!currentItem.product) {
+      alert('Please select a product');
+      return;
+    }
+    
+    if (!currentItem.quantity || currentItem.quantity <= 0) {
+      alert('Please enter a valid quantity');
+      return;
+    }
+
+    if (!currentItem.price || currentItem.price <= 0) {
+      alert('Please enter a valid price');
+      return;
+    }
+
+    // Check if product already exists in order
+    const existingItemIndex = orderItems.findIndex(item => item.product === currentItem.product);
+    
+    if (existingItemIndex >= 0) {
+      // Update existing item quantity
+      const updatedItems = [...orderItems];
+      updatedItems[existingItemIndex].quantity = parseInt(updatedItems[existingItemIndex].quantity) + parseInt(currentItem.quantity);
+      setOrderItems(updatedItems);
+    } else {
+      // Add new item (will be created when saving)
+      const selectedProduct = availableProducts.find(p => p.id === parseInt(currentItem.product));
+      const newItem = {
+        ...currentItem,
+        productName: selectedProduct?.name || 'Unknown Product',
+        productDetails: selectedProduct,
+        isNew: true // Flag to indicate this is a new item
+      };
+      setOrderItems(prev => [...prev, newItem]);
+    }
+
+    // Reset current item
+    setCurrentItem({
+      product: '',
+      quantity: 1,
+      price: '',
+      discount: 0
+    });
+  };
+
+  // Remove item from order
+  const removeItemFromOrder = (index) => {
+    const item = orderItems[index];
+    if (item.id && !item.isNew) {
+      // Mark existing item for deletion
+      setOrderItems(prev => prev.map((item, i) => 
+        i === index ? { ...item, toDelete: true } : item
+      ));
+    } else {
+      // Remove new item completely
+      setOrderItems(prev => prev.filter((_, i) => i !== index));
+    }
+  };
+
+  // Restore deleted item
+  const restoreItem = (index) => {
+    setOrderItems(prev => prev.map((item, i) => 
+      i === index ? { ...item, toDelete: false } : item
+    ));
+  };
+
+  // Update item in order
+  const updateOrderItem = (index, field, value) => {
+    setOrderItems(prev => prev.map((item, i) => 
+      i === index ? { ...item, [field]: value, isModified: true } : item
+    ));
+  };
+
+  // Calculate totals
+  const calculateItemTotal = (item) => {
+    if (item.toDelete) return 0;
+    const price = parseFloat(item.price) || 0;
+    const quantity = parseInt(item.quantity) || 0;
+    const discount = parseFloat(item.discount) || 0;
+    return (price * quantity) - discount;
+  };
+
+  const calculateOrderTotal = () => {
+    return orderItems.reduce((sum, item) => sum + calculateItemTotal(item), 0);
+  };
+
+  // Validate form
+  const validateForm = () => {
+    const newErrors = {};
+
+    if (!formData.customer) {
+      newErrors.customer = 'Customer is required';
+    }
+
+    const activeItems = orderItems.filter(item => !item.toDelete);
+    if (activeItems.length === 0) {
+      newErrors.items = 'At least one item is required';
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  // Handle form submission
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!validateForm()) {
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // Find customer ID from the selected customer name
+      const selectedCustomer = customers.find(c => c.name === formData.customer);
+      if (!selectedCustomer) {
+        alert('Selected customer not found. Please refresh and try again.');
+        setLoading(false);
+        return;
+      }
+
+      // Update the order with customer_id instead of customer name
+      const orderResponse = await axios.patch(`http://localhost:8000/api/orders/${order.id}/`, {
+        customer_id: selectedCustomer.id,
+        status: formData.status,
+        total: calculateOrderTotal().toFixed(2)
+      });
+
+      // Handle order items
+      for (const item of orderItems) {
+        if (item.toDelete && item.id) {
+          // Delete existing item
+          await axios.delete(`http://localhost:8000/api/order-items/${item.id}/`);
+        } else if (item.isNew) {
+          // Create new item
+          await axios.post('http://localhost:8000/api/order-items/', {
+            order_id: order.id,
+            product_id: parseInt(item.product),
+            quantity: parseInt(item.quantity),
+            price: parseFloat(item.price).toFixed(2),
+            discount: parseFloat(item.discount || 0).toFixed(2)
+          });
+        } else if (item.isModified && item.id) {
+          // Update existing item
+          await axios.patch(`http://localhost:8000/api/order-items/${item.id}/`, {
+            quantity: parseInt(item.quantity),
+            price: parseFloat(item.price).toFixed(2),
+            discount: parseFloat(item.discount || 0).toFixed(2)
+          });
+        }
+      }
+
+      console.log('✅ Order updated successfully:', order.id);
+      onOrderUpdated(orderResponse.data);
+
+    } catch (error) {
+      console.error('❌ Error updating order:', error);
+      
+      if (error.response?.data) {
+        const serverErrors = error.response.data;
+        setErrors(serverErrors);
+      } else {
+        alert('Failed to update order. Please try again.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!order) return null;
+
+  return (
+    <div className="modal-overlay">
+      <div className="order-form-modal">
+        <div className="modal-header">
+          <h2>✏️ Edit Order #{order.id}</h2>
+          <button onClick={onCancel} className="close-btn">✕</button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="order-form">
+          <div className="modal-content">
+            {/* Order Information */}
+            <div className="form-section">
+              <h3>📋 Order Information</h3>
+              
+              <div className="form-row">
+                <div className="form-group">
+                  <label htmlFor="customer">Customer *</label>
+                  <select
+                    id="customer"
+                    name="customer"
+                    value={formData.customer}
+                    onChange={handleInputChange}
+                    className={errors.customer ? 'error' : ''}
+                    required
+                    disabled={order.status === 'Completed'}
+                  >
+                    <option value="">Select Customer</option>
+                    {customers.map(customer => (
+                      <option key={customer.id} value={customer.name}>
+                        {customer.name}
+                      </option>
+                    ))}
+                  </select>
+                  {errors.customer && <span className="error-message">{errors.customer}</span>}
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="status">Status</label>
+                  <select
+                    id="status"
+                    name="status"
+                    value={formData.status}
+                    onChange={handleInputChange}
+                  >
+                    <option value="Pending">Pending</option>
+                    <option value="Processing">Processing</option>
+                    <option value="Completed">Completed</option>
+                    <option value="Cancelled">Cancelled</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Add Items Section - Only show if order is not completed */}
+            {order.status !== 'Completed' && (
+              <div className="form-section">
+                <h3>📦 Add Items</h3>
+                
+                <div className="add-item-form">
+                  <div className="item-form-row">
+                    <div className="form-group">
+                      <label htmlFor="product">Product</label>
+                      <select
+                        id="product"
+                        name="product"
+                        value={currentItem.product}
+                        onChange={handleItemChange}
+                      >
+                        <option value="">Select Product</option>
+                        {availableProducts.map(product => (
+                          <option key={product.id} value={product.id}>
+                            {product.name} (Stock: {product.quantity})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="quantity">Quantity</label>
+                      <input
+                        type="number"
+                        id="quantity"
+                        name="quantity"
+                        value={currentItem.quantity}
+                        onChange={handleItemChange}
+                        min="1"
+                        className="quantity-input"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="price">Unit Price</label>
+                      <input
+                        type="number"
+                        id="price"
+                        name="price"
+                        value={currentItem.price}
+                        onChange={handleItemChange}
+                        step="0.01"
+                        min="0"
+                        className="price-input"
+                        placeholder="0.00"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="discount">Discount</label>
+                      <input
+                        type="number"
+                        id="discount"
+                        name="discount"
+                        value={currentItem.discount}
+                        onChange={handleItemChange}
+                        step="0.01"
+                        min="0"
+                        className="discount-input"
+                        placeholder="0.00"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <button
+                        type="button"
+                        onClick={addItemToOrder}
+                        className="add-item-btn"
+                        disabled={!currentItem.product || !currentItem.quantity || !currentItem.price}
+                      >
+                        ➕ Add
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {errors.items && <span className="error-message">{errors.items}</span>}
+              </div>
+            )}
+
+            {/* Order Items List */}
+            {orderItems.length > 0 && (
+              <div className="form-section">
+                <h3>🛒 Order Items ({orderItems.filter(item => !item.toDelete).length})</h3>
+                
+                <div className="order-items-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Product</th>
+                        <th>Qty</th>
+                        <th>Unit Price</th>
+                        <th>Discount</th>
+                        <th>Total</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orderItems.map((item, index) => (
+                        <tr key={index} className={item.toDelete ? 'deleted-item' : item.isNew ? 'new-item' : item.isModified ? 'modified-item' : ''}>
+                          <td className="product-cell">
+                            <strong>{item.productName}</strong>
+                            {item.isNew && <span className="item-badge new">NEW</span>}
+                            {item.toDelete && <span className="item-badge deleted">DELETED</span>}
+                            {item.isModified && !item.isNew && <span className="item-badge modified">MODIFIED</span>}
+                          </td>
+                          <td className="quantity-cell">
+                            {item.toDelete ? (
+                              <span className="deleted-value">{item.quantity}</span>
+                            ) : (
+                              <input
+                                type="number"
+                                value={item.quantity}
+                                onChange={(e) => updateOrderItem(index, 'quantity', e.target.value)}
+                                min="1"
+                                className="table-input"
+                                disabled={order.status === 'Completed'}
+                              />
+                            )}
+                          </td>
+                          <td className="price-cell">
+                            {item.toDelete ? (
+                              <span className="deleted-value">{formatPrice(item.price)}</span>
+                            ) : (
+                              <input
+                                type="number"
+                                value={item.price}
+                                onChange={(e) => updateOrderItem(index, 'price', e.target.value)}
+                                step="0.01"
+                                min="0"
+                                className="table-input"
+                                disabled={order.status === 'Completed'}
+                              />
+                            )}
+                          </td>
+                          <td className="discount-cell">
+                            {item.toDelete ? (
+                              <span className="deleted-value">{formatPrice(item.discount)}</span>
+                            ) : (
+                              <input
+                                type="number"
+                                value={item.discount}
+                                onChange={(e) => updateOrderItem(index, 'discount', e.target.value)}
+                                step="0.01"
+                                min="0"
+                                className="table-input"
+                                disabled={order.status === 'Completed'}
+                              />
+                            )}
+                          </td>
+                          <td className="total-cell">
+                            <strong>{formatPrice(calculateItemTotal(item))}</strong>
+                          </td>
+                          <td className="actions-cell">
+                            {item.toDelete ? (
+                              <button
+                                type="button"
+                                onClick={() => restoreItem(index)}
+                                className="restore-item-btn"
+                                disabled={order.status === 'Completed'}
+                              >
+                                ↺ Restore
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => removeItemFromOrder(index)}
+                                className="remove-item-btn"
+                                disabled={order.status === 'Completed'}
+                              >
+                                🗑️
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Order Total */}
+                <div className="order-total-section">
+                  <div className="total-row">
+                    <span className="total-label">Order Total:</span>
+                    <span className="total-amount">{formatPrice(calculateOrderTotal())}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Form Actions */}
+          <div className="modal-footer">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="cancel-btn"
+              disabled={loading}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="submit-btn"
+              disabled={loading || orderItems.filter(item => !item.toDelete).length === 0}
+            >
+              {loading ? '⏳ Updating...' : '✅ Update Order'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default EditOrderForm;
